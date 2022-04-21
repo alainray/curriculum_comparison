@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from comet_ml import Experiment, ExistingExperiment
 import collections
 import torch
 from torch import Tensor
@@ -29,7 +30,78 @@ sys.path.append("..")
 from third_party import models
 import numpy as np
 import torch.nn as nn
+import argparse
+import random
+import warnings
 
+def get_args():
+  parser = argparse.ArgumentParser(description='PyTorch Training')
+  parser.add_argument('--data-dir', default='dataset',
+                      help='path to dataset')
+  parser.add_argument('--order-dir', default='cifar10-cscores-orig-order.npz',
+                      help='path to train val idx')
+  parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
+                      help='model architecture: (default: resnet18)')
+  parser.add_argument('--dataset', default='cifar10', type=str,
+                      help='dataset')
+  parser.add_argument('--printfreq', default=10, type=int,
+                      help='print frequency (default: 10)')
+  parser.add_argument('--workers', default=4, type=int,
+                      help='number of data loading workers (default: 4)')
+  parser.add_argument('--epochs', default=100, type=int,
+                      help='number of total epochs to run')
+  parser.add_argument('-b', '--batchsize', default=128, type=int,
+                      help='mini-batch size (default: 256), this is the total')
+  parser.add_argument('--optimizer', default="sgd", type=str,
+                      help='optimizer')
+  parser.add_argument('--scheduler', default="cosine", type=str,
+                      help='lr scheduler')
+  parser.add_argument('--lr', default=0.1, type=float,
+                      help='initial learning rate', dest='lr')
+  parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
+                      help='momentum')
+  parser.add_argument('--wd', default=5e-4, type=float,
+                      help='weight decay (default: 1e-4)')
+  parser.add_argument('--seed', default=None, type=int,
+                      help='seed for initializing training. ')
+  # curriculum params
+  parser.add_argument("--pacing-f", default="linear", type=str, help="which pacing function to take")
+  parser.add_argument('--pacing-a', default=1., type=float,
+                      help='weight decay (default: 1e-4)')
+  parser.add_argument('--pacing-b', default=1., type=float,
+                      help='weight decay (default: 1e-4)')
+  parser.add_argument("--ordering", default="curr", type=str, help="which test case to use. supports: standard, curriculum, anti and random")
+  parser.add_argument('--rand-fraction', default=0., type=float,
+                    help='label curruption (default:0)')
+  parser.add_argument("--cometKey", type=str)
+  parser.add_argument("--cometWs", type=str)
+  parser.add_argument("--cometName", type=str)
+
+  return parser.parse_args()
+
+# Comet Experiments
+def setup_comet(args, resume_experiment_key=''):
+    api_key = args.cometKey 
+    workspace = args.cometWs 
+    project_name = args.cometName
+    enabled = bool(api_key) and bool(workspace)
+    disabled = not enabled
+    print(f"Setting up comet logging using: {{api_key={api_key}, workspace={workspace}, enabled={enabled}}}")
+
+    if resume_experiment_key:
+        experiment = ExistingExperiment(api_key=api_key, previous_experiment=resume_experiment_key)
+        return experiment
+
+    experiment_name = get_prefix(args)
+
+    experiment = Experiment(api_key=api_key, parse_args=False, project_name=project_name,
+                            workspace=workspace, disabled=disabled)
+    if experiment_name:
+      experiment.set_name(experiment_name)
+    return experiment
+
+def get_prefix(args):
+    return "_".join([str(w) for k,w in vars(args).items() if "comet" not in k])
 
 def run_cmd(cmd_str, prev_sp=None):
   """
@@ -45,18 +117,13 @@ def get_model(model_name, nchannels=3, imsize=32, nclasses=10, half=False):
 
   ngpus = torch.cuda.device_count()
 
-  print("=> creating model '{}'".format(model_name))
+  print("=> Creating model '{}'".format(model_name))
   if imsize < 128 and model_name in models.__dict__:
     model = models.__dict__[model_name](num_classes=nclasses, nchannels=nchannels)
   model = nn.DataParallel(model).cuda()
   cudnn.benchmark = True
-  if half:
-    print('Using half precision except in Batch Normalization!')
-    model = model.half()
-    for module in model.modules():
-      if (isinstance(module, nn.BatchNorm2d) or isinstance(module, nn.BatchNorm1d)):
-        module.float()
   return model
+
 def get_optimizer(optimizer_name, parameters, lr, momentum=0, weight_decay=0):
   if optimizer_name == 'sgd':
     return optim.SGD(parameters, lr, momentum=momentum, weight_decay=weight_decay)
@@ -94,12 +161,22 @@ def run_cmd(cmd_str, prev_sp=None):
     prev_sp.wait()
   return subprocess.Popen(cmd_str, shell=True)#, stdout=open(os.devnull, 'w'), stderr=open(os.devnull, 'w'))
 
+def set_seed(seed=None):
+    if seed is not None:
+        random.seed(seed)
+        torch.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        warnings.warn('You have chosen to seed training. '
+                    'This will turn on the CUDNN deterministic setting, '
+                    'which can slow down your training considerably! '
+                    'You may see unexpected behavior when restarting '
+                    'from checkpoints.')
 
 class LossTracker(object):
   def __init__(self, num, prefix='', print_freq=1):
     self.print_freq=print_freq
     self.batch_time = AverageMeter('Time', ':6.3f')
-    self.losses = AverageMeter('Loss', ':.4e')
+    self.losses = AverageMeter('Loss', ':.4f')
     self.top1 = AverageMeter('Acc@1', ':6.2f')
     self.top5 = AverageMeter('Acc@5', ':6.2f')
     self.progress = ProgressMeter( num, [self.batch_time, self.losses, self.top1, self.top5], prefix=prefix)

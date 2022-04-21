@@ -13,10 +13,46 @@
 # limitations under the License.
 
 import os
+import torch
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from torch.utils.data import Subset
 from .cifar_label import *
-def get_dataset(dataset_name, data_dir, split, rand_fraction=None,clean=False, transform=None, imsize=None, bucket='pytorch-data', **kwargs):
+import collections
+import wget
+
+def get_order(args):
+  if 'cscores-orig-order.npz' in args.order_dir:
+    temp_path = os.path.join("orders",args.dataset+'-cscores-orig-order.npz')
+    if not os.path.isfile(temp_path):        
+        print ('Downloading the data cifar10-cscores-orig-order.npz and cifar100-cscores-orig-order.npz to folder orders')
+        if 'cifar100' == args.dataset:
+            url = 'https://pluskid.github.io/structural-regularity/cscores/cifar100-cscores-orig-order.npz'
+        elif 'cifar10' == args.dataset:
+            url = 'https://pluskid.github.io/structural-regularity/cscores/cifar10-cscores-orig-order.npz'
+        elif 'imagenet' == args.dataset:
+            url = "https://pluskid.github.io/structural-regularity/cscores/imagenet-cscores-with-filename.npz"
+        wget.download(url, './orders')
+    temp_x = np.load(temp_path)['scores']
+    ordering = collections.defaultdict(list)
+    list(map(lambda a, b: ordering[a].append(b), np.arange(len(temp_x)),temp_x))
+    order = [k for k, v in sorted(ordering.items(), key=lambda item: -1*item[1][0])]
+  else:
+    print ('Please check if the files %s in your folder -- orders. See ./orders/README.md for instructions on how to create the folder' %(args.order_dir))
+    order = [x for x in list(torch.load(os.path.join("orders",args.order_dir)).keys())]
+  return order
+ 
+def get_curr_dl(args, train_set, order, start, end):
+  return torch.utils.data.DataLoader(Subset(train_set, list(order[start:max(end,256)])),\
+                                                           batch_size=args.batchsize,\
+                                                           shuffle=True, num_workers=args.workers, pin_memory=True)
+     
+def get_dataset(args, split, clean=False, transform=None, imsize=None, bucket='pytorch-data', **kwargs):
+  dataset_name = args.dataset
+  data_dir = args.data_dir
+  rand_fraction = args.rand_fraction
+  if split == "val" and dataset_name == "cifar100N":
+    pass
   if dataset_name in [ 'cifar10', 'cifar100']:
     dataset = globals()[f'get_{dataset_name}'](dataset_name, data_dir, split, transform=imsize, imsize=imsize, bucket=bucket, **kwargs)    
   elif dataset_name in ['cifar100N']:
